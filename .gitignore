@@ -1,0 +1,11 @@
+build/
+build-*/
+secrets/
+profiles/
+tools/
+*.pem
+
+# Session build/diagnostic logs
+regress.log
+regress.err
+*.log
