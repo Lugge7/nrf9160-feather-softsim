@@ -6,7 +6,7 @@ Firmware for a Circuit Dojo nRF9160 Feather, targeting a cellular asset tracker.
 up: a Monogoto SoftSIM (no physical SIM) provisions and registers. `README.md` carries the
 hardware bring-up narrative and measured results; this file covers commands and structure.
 
-Not a git repository. There is no test suite, linter, or CI — the only automated check is
+There is no test suite, linter, or CI — the only automated check is
 `.\New-SoftSimProfile.ps1 -SelfTest`, which verifies the EF.IMSI/EF.ICCID encoders against the
 upstream reference profile.
 
@@ -30,9 +30,9 @@ Each app has its own build directory; `-d` is always passed explicitly.
 west build -b circuitdojo_feather/nrf9160/ns -d build          apps\blinky
 west build -b circuitdojo_feather/nrf9160/ns -d build-at       apps\at_client
 west build -b circuitdojo_feather/nrf9160/ns -d build-softsim  apps\softsim `
-  -- "-DEXTRA_ZEPHYR_MODULES=C:/Users/lugge/Desktop/nRF9160/modules/onomondo-softsim"
+  -- "-DEXTRA_ZEPHYR_MODULES=C:/path/to/nRF9160/modules/onomondo-softsim"
 west build -b circuitdojo_feather/nrf9160/ns -d build-throughput apps\throughput `
-  -- "-DEXTRA_ZEPHYR_MODULES=C:/Users/lugge/Desktop/nRF9160/modules/onomondo-softsim"
+  -- "-DEXTRA_ZEPHYR_MODULES=C:/path/to/nRF9160/modules/onomondo-softsim"
 ```
 
 `-DEXTRA_ZEPHYR_MODULES` is **mandatory for any SoftSIM app**. `modules/onomondo-softsim` is
@@ -58,7 +58,7 @@ bootloader mode: hold MODE, tap RST, keep holding MODE until the blue LED is sol
 `flash.ps1` defaults to blinky's image; pass `-Image` for anything else (`-Port` to override
 COM15).
 
-**SWD (J-Link, S/N 853004498)** — the only way to write outside the app slot.
+**SWD (J-Link)** — the only way to write outside the app slot.
 
 ```powershell
 nrfutil device program --firmware .\build-softsim\merged.hex --options chip_erase_mode=ERASE_ALL

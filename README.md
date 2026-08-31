@@ -60,7 +60,7 @@ over `flash.ps1` serial DFU without the probe.
 ```powershell
 . .\env.ps1
 west build -b circuitdojo_feather/nrf9160/ns -d build-softsim apps\softsim `
-  -- "-DEXTRA_ZEPHYR_MODULES=C:/Users/lugge/Desktop/nRF9160/modules/onomondo-softsim"
+  -- "-DEXTRA_ZEPHYR_MODULES=C:/path/to/nRF9160/modules/onomondo-softsim"
 ```
 
 The `-DEXTRA_ZEPHYR_MODULES` flag is **required** — `modules\onomondo-softsim` is out-of-tree
@@ -158,8 +158,8 @@ the HEX-image route — neither is needed to bring a single SIM up.
 
 **Take the ICCID from the CSV, not the console.** The console truncates it to 19 digits;
 the real one is 20, including a Luhn check digit. `New-SoftSimProfile.ps1` F-pads the
-missing nibble and silently produces a different EF.ICCID (`...4864F5` instead of
-`...486495`). The modem reports the 20-digit form via `AT%XICCID`.
+missing nibble and silently produces a different EF.ICCID — the last byte comes out
+`F<digit>` instead of the swapped-BCD check digit. The modem reports the 20-digit form via `AT%XICCID`.
 
 No APN configuration is needed — attach works with nothing set. Monogoto's APN is
 `go.mono` if something later needs the context named explicitly; in NCS 3.4 the symbols are
@@ -201,7 +201,7 @@ profiles\, secrets\       real SIM credentials — gitignored, never commit
 | Board target | `circuitdojo_feather/nrf9160/ns` |
 | Board support | upstream Zephyr, `zephyr/boards/circuitdojo/feather/` |
 | Flash | MCUboot serial DFU over the CP2102N on **COM15**; J-Link on SWDIO/SWCLK for `merged.hex` |
-| Debug probe | J-Link Plus Compact, S/N 853004498 — wired to the SWD pins |
+| Debug probe | J-Link Plus Compact — wired to the SWD pins |
 | SIM | Monogoto SoftSIM, Profile E Global (MCC/MNC 295/05), APN `go.mono` |
 | Editor | nRF Connect for VSCode + Circuit Dojo Zephyr Tools |
 
