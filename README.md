@@ -28,6 +28,25 @@ Watch the console with any serial terminal on **COM15 @ 115200**, or the VS Code
 working 2026-08-04: registered roaming on Tele2 Sweden (`+COPS: 0,2,"24007",7`, LTE-M),
 attach in ~9 s.
 
+### Getting a SIM
+
+1. Create an account at [hub.monogoto.io](https://hub.monogoto.io/).
+2. Order **Global SIM Pay As You Go** ($1 per SIM) as a **SoftSIM**, with **Profile E Global**
+   (MCC/MNC 295/05). Pay by card in the Hub.
+3. **Wait 1–2 days.** You can't provision anything until Monogoto's fulfilment email arrives.
+   The SIMs may already show up in the Hub as Things before then, but the credentials only
+   come in that email.
+4. The email attaches a CSV with one row per SIM: `ICCID, IMSI, MSISDN, KI, OPC, Profile`. The
+   `Profile` column is the finished 190-hex-char string you paste at the provisioning prompt.
+   Keep the CSV out of git, because it contains each SIM's Ki and OPc.
+5. Continue with [Build and provision](#build-and-provision) below.
+
+Monogoto's own [SoftSIM page](https://monogoto.io/softsim/) describes a different route: feed
+those credentials to the SoftSIM API ([developer.monogoto.io](https://developer.monogoto.io/overview))
+to generate a per-chip `.hex`, then flash it with nRF Connect Programmer. This repo skips that
+step. It hands the CSV's `Profile` string to the Onomondo stack's serial provisioning, so no
+API key is needed. `Get-SoftSimProfile.ps1` implements the `.hex` route if you want it.
+
 ### The one thing that will waste your afternoon
 
 **A fresh SoftSIM cannot be brought up over serial DFU.** The SIM's filesystem needs an
@@ -156,8 +175,10 @@ Monogoto's fulfilment email attaches a CSV whose **`Profile` column is already t
 TLV string**. The `/softsim/nordic/generate` API and `Get-SoftSimProfile.ps1` are only for
 the HEX-image route — neither is needed to bring a single SIM up.
 
-**Take the ICCID from the CSV, not the console.** The console truncates it to 19 digits;
-the real one is 20, including a Luhn check digit. `New-SoftSimProfile.ps1` F-pads the
+**Take the ICCID from the `Profile` string or from `AT%XICCID`, not from the console or the
+CSV's `ICCID` column.** The Hub console and the CSV column both truncate it to 19 digits. The
+real ICCID has 20, including a Luhn check digit. Inside `Profile` it's TLV tag `02`, in
+swapped-nibble BCD. `New-SoftSimProfile.ps1` F-pads the
 missing nibble and silently produces a different EF.ICCID — the last byte comes out
 `F<digit>` instead of the swapped-BCD check digit. The modem reports the 20-digit form via `AT%XICCID`.
 
@@ -202,7 +223,7 @@ profiles\, secrets\       real SIM credentials — gitignored, never commit
 | Board support | upstream Zephyr, `zephyr/boards/circuitdojo/feather/` |
 | Flash | MCUboot serial DFU over the CP2102N on **COM15**; J-Link on SWDIO/SWCLK for `merged.hex` |
 | Debug probe | J-Link Plus Compact — wired to the SWD pins |
-| SIM | Monogoto SoftSIM, Profile E Global (MCC/MNC 295/05), APN `go.mono` |
+| SIM | Monogoto SoftSIM, Profile E Global (MCC/MNC 295/05), APN `go.mono`; $1 Pay As You Go, ordered via hub.monogoto.io |
 | Editor | nRF Connect for VSCode + Circuit Dojo Zephyr Tools |
 
 Zephyr Tools is installed for its `newtmgr` binary only. **Do not run its Setup command** — it would install a second SDK outside `C:\ncs`.
