@@ -1,3 +1,4 @@
 [submodule "modules/onomondo-softsim"]
 	path = modules/onomondo-softsim
-	url = https://github.com/onomondo/nrf-softsim.git
+	url = https://github.com/Lugge7/nrf-softsim.git
+	branch = feather-att-compat
