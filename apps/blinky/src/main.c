@@ -1,9 +1,14 @@
 /*
- * Blinky for the Circuit Dojo nRF9160 Feather.
+ * Blinky: toolchain smoke test, built for both boards in this repo.
  *
- * Drives the blue LED (D7) via the board's "led0" alias, which maps to
- * gpio0 pin 3, GPIO_ACTIVE_LOW. See
- * zephyr/boards/circuitdojo/feather/circuitdojo_feather_nrf9160_common.dtsi
+ * Drives whatever the board's "led0" alias points at:
+ *   Feather  blue LED D7,  gpio0 pin 3,  GPIO_ACTIVE_LOW
+ *            zephyr/boards/circuitdojo/feather/circuitdojo_feather_nrf9160_common.dtsi
+ *   Icarus   red LED,      gpio0 pin 10, GPIO_ACTIVE_LOW
+ *            zephyr/boards/actinius/icarus/actinius_icarus_common.dtsi
+ *
+ * Note the Feather's D7 is wired active HIGH against its own board DTS, so its
+ * LED runs inverted from what this code says; the Icarus's declaration is honest.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,7 +28,7 @@ int main(void)
 	int ret;
 	bool led_on = true;
 
-	printk("nRF9160 Feather blinky\n");
+	printk("%s blinky\n", CONFIG_BOARD_TARGET);
 
 	if (!gpio_is_ready_dt(&led)) {
 		printk("error: LED device %s is not ready\n", led.port->name);
