@@ -1,26 +1,98 @@
-# nRF9160 Feather
+# nRF9160 cellular tracker
 
-Firmware for a Circuit Dojo nRF9160 Feather. Goal: a cellular asset tracker.
-Current state: **cellular is up.** A Monogoto SoftSIM provisions and registers on the
-network — no physical SIM, no SIM slot used.
+Firmware and host tools for a cellular asset tracker on two nRF9160 boards: the
+**Circuit Dojo nRF9160 Feather** and the **Actinius Icarus v2**. Both run on a
+**Monogoto SoftSIM**, so the SIM is software and needs no physical card or slot.
 
-## Build and flash
+## What works
+
+- **Cellular:** the SoftSIM provisions and attaches on LTE-M in about 5–15 s.
+- **Cell-tower location:** through nRF Cloud CoAP, about 13 s from reset, to within ~400 m.
+- **GNSS with A-GNSS:** a 2.1 s fix when warm, about 15 s from cold.
+- **Memfault:** crash reports, reboot reasons and heartbeats over HTTPS.
+- **Live map:** both boards on one page, built from nRF Cloud's location history.
+- **New boards:** a fresh Icarus goes from the box to the map with one command.
+
+## Quick start
+
+Windows and PowerShell throughout. Every command runs from the repo root.
+
+**1. Buy a SIM.** In [hub.monogoto.io](https://hub.monogoto.io/), order **Global SIM Pay As
+You Go** ($1) as a **SoftSIM** with **Profile E Global**. **It takes 1–2 days** before the
+email with the SIM details (a CSV) arrives. You need the `Profile` column from it.
+[Details](#getting-a-sim)
+
+**2. Install the toolchain.** Install nRF Connect SDK **v3.4.0** into `C:\ncs` (for example
+with nRF Connect for Desktop's Toolchain Manager). Then load it in every new shell:
 
 ```powershell
 . .\env.ps1
-west build -b circuitdojo_feather/nrf9160/ns -d build apps\blinky
-.\flash.ps1
 ```
 
-Before `flash.ps1`, put the board in bootloader mode:
+**3. Build the SoftSIM app.** The quoted `-D` flag is required:
 
-1. **Hold** MODE
-2. **Tap** RST while still holding MODE
-3. **Keep holding** MODE until the blue LED lights solid
+```powershell
+west build -b circuitdojo_feather/nrf9160/ns -d build-softsim apps\softsim `
+  -- "-DEXTRA_ZEPHYR_MODULES=C:/path/to/this/repo/modules/onomondo-softsim"
+```
 
-Add `--pristine` to `west build` only after changing `sysbuild.conf`, the board target, or Kconfig defaults. Normal source edits rebuild in ~30 s.
+For the Icarus, use `-b actinius_icarus@2.0.0/nrf9160/ns -d build-softsim-icarus`.
 
-Watch the console with any serial terminal on **COM15 @ 115200**, or the VS Code Serial Monitor.
+**4. Flash it once over SWD** with a J-Link. This first flash has to be over SWD, because only
+`merged.hex` carries the SIM's filesystem. **Do this only on a new board**, because it
+erases everything:
+
+```powershell
+nrfutil device program --firmware .\build-softsim\merged.hex --options chip_erase_mode=ERASE_ALL
+nrfutil device reset
+```
+
+**5. Provision the SIM.** Open the board's console at 115200 baud (COM15 on the Feather). When
+it prompts, paste the `Profile` string and press Enter. It provisions, reboots and attaches.
+You're done when you see `LTE connected!` followed by `check 1/3 PASSED`.
+
+**New Icarus?** `.\New-IcarusBoard.ps1 -Name 'Icarus 3'` does all of this, plus the modem
+update and nRF Cloud onboarding, in one run. It needs the Asset Tracker Template workspace
+next to this repo (`..\att`). [Details](#icarus-v2)
+
+## Apps
+
+| App | What it does |
+|---|---|
+| `apps/blinky` | Blinks the LED. Use it to check the toolchain. |
+| `apps/at_client` | A raw AT command shell over the console. |
+| `apps/softsim` | Provisions the SoftSIM, attaches, and checks that the internet is reachable. |
+| `apps/throughput` | Measures download speed per band. **Loops forever, ~8 MB/h.** |
+| `apps/nrf_cloud_coap_location` | Cell-tower location from nRF Cloud. |
+| `apps/gnss_agnss` | GNSS fixes with nRF Cloud assistance. |
+| `apps/memfault` | Memfault crash reports and metrics over cellular. |
+| `apps/accel` | Reads the Feather's LIS2DH accelerometer. |
+
+Host scripts: `Get-TrackerHistory.ps1`, `New-TrackerMap.ps1` and `Serve-TrackerMap.ps1`
+build the live map. `New-IcarusBoard.ps1` brings up a new board, and `flash.ps1` does
+serial DFU.
+
+## Six things that will cost you an afternoon
+
+1. **A fresh SIM can't be set up over serial DFU.** Flash `merged.hex` over SWD once, as in
+   step 4. [Why](#the-one-thing-that-will-waste-your-afternoon)
+2. **`nrfutil device program` erases the whole chip by default**, SIM included. For anything
+   after that first flash, pass `--options chip_erase_mode=ERASE_RANGES_TOUCHED_BY_FIRMWARE`.
+3. **Never flash an app without a `pm_static.yml` onto a provisioned board.** `apps/at_client`
+   is one. Its storage lands on top of the SIM and destroys it.
+   [Why](#nrf-cloud-coap-location)
+4. **The Icarus ships with modem firmware 1.2.3**, which can't run a SoftSIM. Update it to 1.3.7
+   first. [How](#icarus-v2)
+5. **`AT%XBANDLOCK` survives a reboot**, and clearing it the obvious way doesn't stick.
+   [How to clear it](#band-locking-will-strand-the-device-if-you-get-it-wrong)
+6. **Circuit Dojo's online docs are for an older SDK.** Several names differ, and the old ones
+   fail silently. [The differences](#circuit-dojos-docs-are-written-for-ncs-2x)
+
+---
+
+# Reference
+
+Everything below is detail: the reasons behind the steps above, measurements, and per-app notes.
 
 ## SoftSIM (Monogoto)
 
@@ -115,6 +187,27 @@ checks follow it, each logging `check N/3 PASSED` after a DNS resolve, a TCP con
 Verify from the same console: `AT+CPIN?` → `READY`, `AT+CIMI` → the IMSI, `AT%XICCID` →
 the ICCID, `AT+COPS?` → the operator.
 
+### Where the profile comes from
+
+Monogoto's fulfilment email attaches a CSV whose **`Profile` column is already the finished
+TLV string**. The `/softsim/nordic/generate` API and `Get-SoftSimProfile.ps1` are only for
+the HEX-image route — neither is needed to bring a single SIM up.
+
+**Take the ICCID from the `Profile` string or from `AT%XICCID`, not from the console or the
+CSV's `ICCID` column.** The Hub console and the CSV column both truncate it to 19 digits. The
+real ICCID has 20, including a Luhn check digit. Inside `Profile` it's TLV tag `02`, in
+swapped-nibble BCD. `New-SoftSimProfile.ps1` F-pads the
+missing nibble and silently produces a different EF.ICCID — the last byte comes out
+`F<digit>` instead of the swapped-BCD check digit. The modem reports the 20-digit form via `AT%XICCID`.
+
+No APN configuration is needed — attach works with nothing set. Monogoto's APN is
+`go.mono` if something later needs the context named explicitly; in NCS 3.4 the symbols are
+`CONFIG_LTE_LC_PDN_MODULE` / `CONFIG_LTE_LC_PDN_DEFAULTS_OVERRIDE` /
+`CONFIG_LTE_LC_PDN_DEFAULT_APN`. Note the `LTE_LC_` prefix — the NCS 2.x `CONFIG_PDN_*`
+form is silently ignored, same trap as the MCUboot one below.
+
+## Link measurements
+
 ### Measured throughput
 
 `apps\throughput` is a probe that times a 100 KB HTTP range-download and prints the rate
@@ -176,106 +269,6 @@ The hardware bites before the link does: no camera interface, no video codec, 25
 A camera needs an external SPI module that emits JPEG itself (OV2640-class); audio can use the
 on-chip PDM or I²S. Sustained streaming is also a power and cost problem — 16 kbps is 7.2 MB/h,
 and LTE-M TX peaks at 200–250 mA.
-
-### Where the profile comes from
-
-Monogoto's fulfilment email attaches a CSV whose **`Profile` column is already the finished
-TLV string**. The `/softsim/nordic/generate` API and `Get-SoftSimProfile.ps1` are only for
-the HEX-image route — neither is needed to bring a single SIM up.
-
-**Take the ICCID from the `Profile` string or from `AT%XICCID`, not from the console or the
-CSV's `ICCID` column.** The Hub console and the CSV column both truncate it to 19 digits. The
-real ICCID has 20, including a Luhn check digit. Inside `Profile` it's TLV tag `02`, in
-swapped-nibble BCD. `New-SoftSimProfile.ps1` F-pads the
-missing nibble and silently produces a different EF.ICCID — the last byte comes out
-`F<digit>` instead of the swapped-BCD check digit. The modem reports the 20-digit form via `AT%XICCID`.
-
-No APN configuration is needed — attach works with nothing set. Monogoto's APN is
-`go.mono` if something later needs the context named explicitly; in NCS 3.4 the symbols are
-`CONFIG_LTE_LC_PDN_MODULE` / `CONFIG_LTE_LC_PDN_DEFAULTS_OVERRIDE` /
-`CONFIG_LTE_LC_PDN_DEFAULT_APN`. Note the `LTE_LC_` prefix — the NCS 2.x `CONFIG_PDN_*`
-form is silently ignored, same trap as the MCUboot one below.
-
-## Layout
-
-```
-env.ps1                   PATH / ZEPHYR_BASE / NRFUTIL_HOME for the C:\ncs toolchain
-flash.ps1                 newtmgr serial DFU to COM15 (override with -Port / -Image)
-New-SoftSimProfile.ps1    encode a TLV profile from raw credentials; -SelfTest verifies it
-Get-SoftSimProfile.ps1    Monogoto API client (only needed for the HEX-image route)
-tools\newtmgr\            newtmgr.exe, SHA256-verified against the Zephyr Tools manifest
-modules\onomondo-softsim\ SoftSIM stack, out-of-tree (not pulled in by west)
-apps\blinky\
-  prj.conf                GPIO + console on uart0
-  sysbuild.conf           SB_CONFIG_BOOTLOADER_MCUBOOT=y
-  src\main.c              toggles the led0 alias every 500 ms
-apps\at_client\           raw AT shell over uart0
-apps\throughput\          times a 100 KB HTTP download; prints band + RSRP + SNR per run
-apps\softsim\
-  prj.conf                external-profile mode, modem + LTE link control
-  sysbuild.conf           partition manager + bundled template hex + MCUboot
-  pm_static.yml           TF-M storage layout
-  overlay-mcuboot.conf    re-sizes the TF-M partition; must apply after the module overlay
-  src\main.c              provisions over serial, then attaches and sends UDP
-build\, build-softsim\    generated; safe to delete
-profiles\, secrets\       real SIM credentials — gitignored, never commit
-```
-
-## Environment
-
-| | |
-|---|---|
-| SDK | nRF Connect SDK **v3.4.0 LTS** at `C:\ncs\v3.4.0` (Zephyr 4.4.0) |
-| Toolchain | `C:\ncs\toolchains\dcbdc366a1` — west 1.5.0, nrfutil 8.1.1, Zephyr SDK |
-| Board target | `circuitdojo_feather/nrf9160/ns` |
-| Board support | upstream Zephyr, `zephyr/boards/circuitdojo/feather/` |
-| Flash | MCUboot serial DFU over the CP2102N on **COM15**; J-Link on SWDIO/SWCLK for `merged.hex` |
-| Debug probe | J-Link Plus Compact — wired to the SWD pins |
-| SIM | Monogoto SoftSIM, Profile E Global (MCC/MNC 295/05), APN `go.mono`; $1 Pay As You Go, ordered via hub.monogoto.io |
-| Editor | nRF Connect for VSCode + Circuit Dojo Zephyr Tools |
-
-Zephyr Tools is installed for its `newtmgr` binary only. **Do not run its Setup command** — it would install a second SDK outside `C:\ncs`.
-
-## Board specifics
-
-The Feather's devicetree already provides everything blinky needs:
-
-| Alias | Node | Detail |
-|---|---|---|
-| `led0` | `blue_led` | gpio0 pin 3, `GPIO_ACTIVE_LOW` — the D7 blue LED |
-| `sw0` | `button0` | gpio0 pin 12, pull-up, active low — the MODE button |
-| `accel0` | `lis2dh` | on-board accelerometer, useful for the tracker |
-| — | `zephyr,uart-mcumgr = &uart0` | the DFU transport |
-
-Source: `C:\ncs\v3.4.0\zephyr\boards\circuitdojo\feather\circuitdojo_feather_nrf9160_common.dtsi`
-
-## Circuit Dojo's docs are written for NCS 2.x
-
-[docs.circuitdojo.com](https://docs.circuitdojo.com/nrf9160-feather/) predates this SDK. Four things differ and each one silently produces a broken build or an image the bootloader rejects:
-
-| Their docs (NCS 2.x) | This project (NCS 3.4) |
-|---|---|
-| `circuitdojo_feather_nrf9160_ns` | `circuitdojo_feather/nrf9160/ns` |
-| `CONFIG_BOOTLOADER_MCUBOOT=y` in `prj.conf` | `SB_CONFIG_BOOTLOADER_MCUBOOT=y` in `sysbuild.conf` |
-| `build/zephyr/app_update.bin` | `build/blinky/zephyr/zephyr.signed.bin` |
-| `CONFIG_PDN_DEFAULT_APN` | `CONFIG_LTE_LC_PDN_DEFAULT_APN` |
-| Asset Tracker v2 | `nrf/applications/asset_tracker_template` |
-
-The Kconfig-vs-sysbuild one is the nastiest: the old symbol is simply ignored under sysbuild, so the build succeeds and produces an unsigned image that the Feather's bootloader refuses. The PDN one fails the same way — silently, since an unknown `CONFIG_` symbol is not an error.
-
-## Build output reference
-
-For blinky, a clean build produces:
-
-| Artifact | Size |
-|---|---|
-| `build\blinky\zephyr\zephyr.bin` (app alone) | 22.4 KB |
-| `build\blinky\zephyr\zephyr.signed.bin` (TF-M + app, signed — **this is what gets flashed**) | 278.5 KB |
-| `build\mcuboot\zephyr\zephyr.hex` (needs a debug probe) | 139.2 KB |
-
-The signed image is large because an `/ns` build bundles TF-M's secure image alongside the app. That is expected, not bloat.
-
-First build takes 10+ minutes — it compiles TF-M and MCUboot. Incremental builds are ~30 s.
 
 ## nRF Cloud CoAP location
 
@@ -375,7 +368,7 @@ from nRF Cloud over CoAP (`coap.nrfcloud.com:5684`, sec tag `16842753`) on the s
 that carries the data session — no second SIM, no separate bearer.
 
 All figures below measured 2026-09-11 in Stockholm, open sky, `AT%XCOEX0=1,1,1565,1586`
-active (without it the GPS antenna is electrically dead — see Board specifics).
+active (without it the GPS antenna is electrically dead — see [Feather](#feather)).
 
 ### Time to first fix
 
@@ -566,6 +559,151 @@ Upload `build-memfault\memfault\zephyr\zephyr.elf` for the matching software ver
 Symbol Files, or with `memfault-cli` and an organization auth token. The project key is an
 ingestion credential only and cannot upload symbols.
 
+## Boards
+
+| | Feather | Icarus v2 |
+|---|---|---|
+| Board target | `circuitdojo_feather/nrf9160/ns` | `actinius_icarus@2.0.0/nrf9160/ns` |
+| Console | 115200 baud, CP2102N (COM15 here) | 115200 baud, FTDI FT231X |
+| `led0` | blue D7, gpio0 3 | red, gpio0 10 |
+| Serial DFU | `.\flash.ps1` | `.\flash.ps1 -Port COMx -Baud 115200` |
+| Bootloader entry | hold MODE, tap RST, keep holding until the LED lights | hold RESET, press the user button, release RESET, then the button. Nothing lights up. |
+| Debug probe | none onboard; external J-Link on SWD | none onboard; external J-Link on SWD |
+
+### Feather
+
+The Feather's devicetree already provides everything blinky needs:
+
+| Alias | Node | Detail |
+|---|---|---|
+| `led0` | `blue_led` | gpio0 pin 3 — the D7 blue LED |
+| `sw0` | `button0` | gpio0 pin 12, pull-up, active low — the MODE button |
+| `accel0` | `lis2dh` | on-board accelerometer, useful for the tracker |
+| — | `zephyr,uart-mcumgr = &uart0` | the DFU transport |
+
+The board DTS declares `led0` as `GPIO_ACTIVE_LOW`, but D7 is actually wired active high, so
+every LED state comes out inverted. A dark LED at boot does not mean the app isn't running.
+
+**The GPS antenna is dead until the modem enables its LNA.** The Feather gates the LNA with the
+modem's COEX0 pin, and nothing in NCS knows that. Every GNSS build needs:
+
+```
+CONFIG_MODEM_ANTENNA=y
+CONFIG_MODEM_ANTENNA_AT_COEX0="AT\%XCOEX0=1,1,1565,1586"
+```
+
+Without it the receiver never sees a satellite, and nothing reports an error. GNSS also needs
+`CONFIG_LTE_NETWORK_MODE_LTE_M_GPS`: plain `LTE_M` excludes GNSS.
+
+Source: `C:\ncs\v3.4.0\zephyr\boards\circuitdojo\feather\circuitdojo_feather_nrf9160_common.dtsi`
+
+### Icarus v2
+
+**Update the modem firmware first.** The board ships with **mfw 1.2.3**. `AT%CSUS`, the
+command that selects the software SIM, needs 1.3.4 or later, and NCS 3.4 is verified
+against 1.3.7. On 1.2.3 the SoftSIM fails as an unknown AT command, which doesn't look like
+a SIM problem at all. Check with `AT+CGMR`, then update over SWD. This leaves app flash, the
+IMEI and the eSIM alone:
+
+```powershell
+nrfutil device program --firmware .\firmware\mfw_nrf9160_1.3.7.zip
+```
+
+Treat it as one-way: Nordic warn that going back to 1.2.x risks certificate corruption.
+
+**The board target puts the revision before the qualifiers**: `actinius_icarus@2.0.0/nrf9160/ns`.
+The Feather-style `actinius_icarus/nrf9160/ns@2.0.0` fails in CMake with "Invalid revision /
+qualifiers format for BOARD". Pass `2.0.0` explicitly: revision 1.4.0 boards use different
+uart0 pins.
+
+**Serial DFU needs `-Baud 115200`.** `flash.ps1` defaults to 1000000 for the Feather, and on
+the Icarus that just times out. Its MCUboot also has no indicator LED, so bootloader mode is
+invisible: the only confirmation is newtmgr connecting. With a J-Link on SWD, flashing over
+SWD is usually quicker.
+
+**`New-IcarusBoard.ps1`** takes a factory-fresh Icarus to the map in one run:
+
+```powershell
+.\New-IcarusBoard.ps1 -Name 'Icarus 3'
+```
+
+It refuses a board that already runs the tracker or already holds a SIM, then:
+
+1. picks the first SIM in the Monogoto CSV that no board uses yet;
+2. updates the modem to 1.3.7;
+3. onboards to nRF Cloud on `apps/at_client`;
+4. flashes the tracker plus the SIM template;
+5. waits for `Connected to Cloud`;
+6. adds the board to `secrets\boards.json`, which the map reads.
+
+It needs `build-at-icarus` (at_client built once for the Icarus) and the Asset Tracker
+Template workspace at `..\att`. Add `-SkipModemUpdate` or `-SkipCloud` to resume after a
+failure.
+
+## Circuit Dojo's docs are written for NCS 2.x
+
+[docs.circuitdojo.com](https://docs.circuitdojo.com/nrf9160-feather/) predates this SDK. Four things differ and each one silently produces a broken build or an image the bootloader rejects:
+
+| Their docs (NCS 2.x) | This project (NCS 3.4) |
+|---|---|
+| `circuitdojo_feather_nrf9160_ns` | `circuitdojo_feather/nrf9160/ns` |
+| `CONFIG_BOOTLOADER_MCUBOOT=y` in `prj.conf` | `SB_CONFIG_BOOTLOADER_MCUBOOT=y` in `sysbuild.conf` |
+| `build/zephyr/app_update.bin` | `build/blinky/zephyr/zephyr.signed.bin` |
+| `CONFIG_PDN_DEFAULT_APN` | `CONFIG_LTE_LC_PDN_DEFAULT_APN` |
+| Asset Tracker v2 | `nrf/applications/asset_tracker_template` |
+
+The Kconfig-vs-sysbuild one is the nastiest: the old symbol is simply ignored under sysbuild, so the build succeeds and produces an unsigned image that the Feather's bootloader refuses. The PDN one fails the same way — silently, since an unknown `CONFIG_` symbol is not an error.
+
+## Environment
+
+| | |
+|---|---|
+| SDK | nRF Connect SDK **v3.4.0 LTS** at `C:\ncs\v3.4.0` (Zephyr 4.4.0) |
+| Toolchain | `C:\ncs\toolchains\dcbdc366a1` — west 1.5.0, nrfutil 8.1.1, Zephyr SDK |
+| Board target | `circuitdojo_feather/nrf9160/ns` |
+| Board support | upstream Zephyr, `zephyr/boards/circuitdojo/feather/` |
+| Flash | MCUboot serial DFU over the CP2102N on **COM15**; J-Link on SWDIO/SWCLK for `merged.hex` |
+| Debug probe | J-Link Plus Compact — wired to the SWD pins |
+| SIM | Monogoto SoftSIM, Profile E Global (MCC/MNC 295/05), APN `go.mono`; $1 Pay As You Go, ordered via hub.monogoto.io |
+| Editor | nRF Connect for VSCode + Circuit Dojo Zephyr Tools |
+
+Zephyr Tools is installed for its `newtmgr` binary only. **Do not run its Setup command** — it would install a second SDK outside `C:\ncs`.
+
+## Build output reference
+
+For blinky, a clean build produces:
+
+| Artifact | Size |
+|---|---|
+| `build\blinky\zephyr\zephyr.bin` (app alone) | 22.4 KB |
+| `build\blinky\zephyr\zephyr.signed.bin` (TF-M + app, signed — **this is what gets flashed**) | 278.5 KB |
+| `build\mcuboot\zephyr\zephyr.hex` (needs a debug probe) | 139.2 KB |
+
+The signed image is large because an `/ns` build bundles TF-M's secure image alongside the app. That is expected, not bloat.
+
+First build takes 10+ minutes — it compiles TF-M and MCUboot. Incremental builds are ~30 s.
+Add `-p always` to `west build` only after changing `sysbuild.conf`, the board target, or
+Kconfig defaults.
+
+## Layout
+
+```
+env.ps1                   PATH / ZEPHYR_BASE / NRFUTIL_HOME for the C:\ncs toolchain
+flash.ps1                 newtmgr serial DFU (-Port / -Baud / -Image)
+monitor.ps1               serial console logger, timestamps every line
+New-IcarusBoard.ps1       one-command bring-up of a fresh Icarus
+Get-TrackerHistory.ps1    pulls positions + battery from nRF Cloud for the map
+New-TrackerMap.ps1        builds the map page from that data
+Serve-TrackerMap.ps1      serves the map locally or over Tailscale, refreshing on a timer
+New-SoftSimProfile.ps1    encode a TLV profile from raw credentials; -SelfTest verifies it
+Get-SoftSimProfile.ps1    Monogoto API client (only needed for the HEX-image route)
+modules\onomondo-softsim\ SoftSIM stack, out-of-tree (not pulled in by west)
+apps\                     one directory per app, see Apps above
+build*\                   generated; safe to delete
+profiles\, secrets\       real SIM credentials, keys, board registry — gitignored, never commit
+TODO.md                   open work, ranked
+```
+
 ## Known gaps
 
 - **No telemetry endpoint.** `apps\softsim\src\main.c` proves the data path with three Google reachability checks and then idles. The upstream sample's `Hello from Onomondo!` UDP send to a placeholder `1.2.3.4:4321` was removed — it failed by design and proved nothing. A real endpoint is still needed for actual tracker payloads.
@@ -575,19 +713,10 @@ ingestion credential only and cannot upload symbols.
 
 ## Next steps
 
-1. Point the UDP socket at a real endpoint and confirm data lands (Monogoto's console shows per-Thing data usage).
-2. ~~Check the modem firmware version~~ — done, `AT+CGMR` reports `mfw_nrf9160_1.3.7`, above the 1.3.5 that nRF Cloud CoAP requires.
-3. Add mcumgr to the app so serial flashing stops needing the buttons.
-4. **Motion-triggered wake-up from the accelerometer** — see below.
-5. Bring up `asset_tracker_template` on the Feather. The cloud endpoint question is now
-   settled: **nRF Cloud over CoAP**, not MQTT — see GNSS and nRF Cloud A-GNSS above for why
-   CoAP is proven on this board. Start by letting nRF Cloud draw the map, then pull the
-   positions out to `tools/feather_map.py` over the nRF Cloud REST API once that works.
-   Dropping `CONFIG_NRF_CLOUD=n` also removes the `check_modules_ready()` hang: that bug
-   only exists because disabling nRF Cloud disables `APP_FOTA`, leaving `fota_ready` with
-   no publisher. Still needed either way: carrying the SoftSIM partition layout across. It
-   does *not* need a board overlay for the LIS2DH: the board DTS already declares
-   `lis2dh@18` on i2c1 with `irq-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>`.
+Ranked open work lives in [TODO.md](TODO.md). Two items that are not in it yet:
+
+1. **Add mcumgr to the apps** so serial flashing stops needing the button gesture.
+2. **Motion-triggered wake-up from the accelerometer**, below.
 
 ### Motion-triggered wake-up
 
