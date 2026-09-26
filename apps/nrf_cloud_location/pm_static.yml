@@ -1,0 +1,55 @@
+# Static partition layout. Two jobs here.
+#
+# 1. Keep nvs_storage at 0xf0000, where this device's SoftSIM data already lives.
+#
+#    Unlike apps/softsim, this app pulls in nRF Cloud, which needs CONFIG_SETTINGS_FCB
+#    and therefore a settings_storage partition. Partition Manager wraps both in a
+#    nonsecure_storage span and, left to place it dynamically, puts the span at 0xe0000
+#    with nvs_storage first:
+#
+#        nvs_storage       0xe0000 - 0xe8000   <- WRONG, SIM is not here
+#        settings_storage  0xe8000 - 0xea000
+#
+#    The app would then mount an empty NVS and report "Failed to init FS", which reads
+#    like SoftSIM corruption but is only a moved partition. nvs_storage is placed
+#    `before: settings_storage` with 32 KB start alignment, so nvs_storage cannot simply
+#    be moved on its own -- settings_storage has to go below it, and the whole span is
+#    pinned into the free gap that runs from the end of mcuboot_secondary to tfm_storage:
+#
+#        settings_storage  0xee000 - 0xf0000
+#        nvs_storage       0xf0000 - 0xf8000   <- matches the provisioned device
+#
+# 2. Pin the TF-M storage partitions above nvs_storage, as in apps/softsim.
+settings_storage:
+  address: 0xee000
+  size: 0x2000
+  region: flash_primary
+
+nvs_storage:
+  address: 0xf0000
+  size: 0x8000
+  region: flash_primary
+
+nonsecure_storage:
+  address: 0xee000
+  size: 0xa000
+  span:
+  - settings_storage
+  - nvs_storage
+
+tfm_its:
+  address: 0xf8000
+  size: 0x2000
+tfm_otp_nv_counters:
+  address: 0xfa000
+  size: 0x2000
+EMPTY_tfm_ps:
+  address: 0xfc000
+  size: 0x4000
+tfm_storage:
+  address: 0xf8000
+  span:
+  - EMPTY_tfm_ps
+  - tfm_its
+  - tfm_otp_nv_counters
+  size: 0x8000

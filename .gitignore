@@ -9,3 +9,33 @@ tools/
 regress.log
 regress.err
 *.log
+
+# Tracker map: the fetched location history and the page built from it. track.json is a
+# log of where the device has physically been, which does not belong in a public repo,
+# and map.html is regenerated from it in one command.
+track*.json
+points.json
+battery.json
+map.html
+*-map.html
+
+# Web root for Serve-TrackerMap.ps1. Holds only the generated map -- kept separate from
+# the repo root on purpose, since serving that would publish secrets/ and profiles/.
+publish/
+
+refresh-errors.log
+
+# SoftSIM fulfilment CSVs. Monogoto's order sheets carry KI and OPC -- the SIM
+# authentication keys -- in plain text, one row per SIM, and they arrive as a browser
+# download named whatever the vendor chose, landing in the repo root rather than in
+# secrets/. Matching the shape is not enough on its own, so any CSV in the root is
+# ignored too: nothing in this project legitimately keeps one there, and the cost of
+# being wrong is a private key in a public repository.
+*[Ss]oft[Ss][Ii][Mm]*.csv
+/*.csv
+
+# Factory flash backups: multi-MB hex images that carry per-device identifiers.
+backups/
+
+# Nordic modem firmware packages: multi-MB vendor binaries under their own license.
+firmware/

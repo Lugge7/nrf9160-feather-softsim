@@ -4,9 +4,11 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
 #include <nrf_softsim.h>
 #include <modem/lte_lc.h>
@@ -21,6 +23,7 @@
 #include <zephyr/sys/reboot.h>
 
 #include "profile_serial.h"
+#include "status_led.h"
 
 LOG_MODULE_REGISTER(softsim_sample, LOG_LEVEL_INF);
 
@@ -29,30 +32,7 @@ LOG_MODULE_REGISTER(softsim_sample, LOG_LEVEL_INF);
 
 K_SEM_DEFINE(lte_connected, 0, 1); /* Semaphore to signal LTE connection established */
 
-static int client_fd;
-static struct sockaddr_storage host_addr;
-static struct k_work_delayable server_transmission_work;
 static const struct device *const uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
-
-static void server_transmission_work_fn(struct k_work *work)
-{
-	char buffer[] = "{\"message\":\"Hello from Onomondo!\"}";
-
-	int err = send(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-	if (err < 0) {
-		LOG_ERR("Failed to transmit UDP packet, %d", errno);
-		k_work_schedule(&server_transmission_work, K_SECONDS(2));
-		return;
-	}
-
-	k_work_schedule(&server_transmission_work, K_SECONDS(150));
-}
-
-static void work_init(void)
-{
-	k_work_init_delayable(&server_transmission_work, server_transmission_work_fn);
-}
 
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
@@ -60,6 +40,18 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 	case LTE_LC_EVT_NW_REG_STATUS:
 		if ((evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_HOME) &&
 		    (evt->nw_reg_status != LTE_LC_NW_REG_REGISTERED_ROAMING)) {
+			/* Not registered. Distinguish "still looking" from "the network
+			 * said no", since the second one will not fix itself.
+			 */
+			switch (evt->nw_reg_status) {
+			case LTE_LC_NW_REG_REGISTRATION_DENIED:
+			case LTE_LC_NW_REG_UICC_FAIL:
+				status_led_set(STATUS_LED_ERROR);
+				break;
+			default:
+				status_led_set(STATUS_LED_LTE_SEARCHING);
+				break;
+			}
 			break;
 		}
 
@@ -67,6 +59,7 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 			evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME
 				? "Connected - home network"
 				: "Connected - roaming");
+		status_led_set(STATUS_LED_LTE_CONNECTED);
 		k_sem_give(&lte_connected);
 		break;
 	case LTE_LC_EVT_PSM_UPDATE:
@@ -102,48 +95,89 @@ static void modem_connect(void)
 	int err = lte_lc_connect_async(lte_handler);
 	if (err) {
 		LOG_ERR("Connecting to LTE network failed, error: %d", err);
+		status_led_set(STATUS_LED_ERROR);
 		return;
 	}
+	status_led_set(STATUS_LED_LTE_SEARCHING);
 }
 
-static void server_disconnect(void)
+/* Reachability check against Google over the SoftSIM data path.
+ *
+ * The nRF9160's sockets are offloaded to the modem, which exposes no raw ICMP
+ * socket, so there is no literal ping. A DNS resolve plus a TCP round-trip is
+ * the equivalent proof: it exercises PDN activation, the modem's DNS, and an
+ * end-to-end TCP session to Google. One pass moves well under 1 KB, which
+ * matters on a PAYG SIM.
+ */
+static int ping_google(void)
 {
-	(void)close(client_fd);
-}
-
-static int server_init(void)
-{
-	struct sockaddr_in *server4 = ((struct sockaddr_in *)&host_addr);
-
-	server4->sin_family = AF_INET;
-	server4->sin_port = htons(4321);
-
-	inet_pton(AF_INET, "1.2.3.4", &server4->sin_addr);
-
-	return 0;
-}
-
-static int server_connect(void)
-{
+	static const char req[] = "HEAD / HTTP/1.1\r\n"
+				  "Host: google.com\r\n"
+				  "Connection: close\r\n\r\n";
+	struct addrinfo *res = NULL;
+	struct addrinfo hints = {
+		.ai_family = AF_INET,
+		.ai_socktype = SOCK_STREAM,
+	};
+	char addr_str[INET_ADDRSTRLEN];
+	char reply[128];
+	int64_t t0;
+	int fd = -1;
 	int err;
 
-	client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (client_fd < 0) {
-		LOG_ERR("Failed to create UDP socket: %d", errno);
-		err = -errno;
-		goto error;
+	t0 = k_uptime_get();
+	err = getaddrinfo("google.com", "80", &hints, &res);
+	if (err || res == NULL) {
+		LOG_ERR("DNS resolve of google.com failed: %d", err);
+		return -1;
 	}
 
-	err = connect(client_fd, (struct sockaddr *)&host_addr, sizeof(struct sockaddr_in));
-	if (err < 0) {
-		LOG_ERR("Connect failed : %d", errno);
-		goto error;
+	inet_ntop(AF_INET, &((struct sockaddr_in *)res->ai_addr)->sin_addr, addr_str,
+		  sizeof(addr_str));
+	LOG_INF("DNS: google.com -> %s (%lld ms)", addr_str, k_uptime_get() - t0);
+
+	fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (fd < 0) {
+		LOG_ERR("Failed to create TCP socket: %d", errno);
+		err = -1;
+		goto out;
 	}
 
-	return 0;
+	t0 = k_uptime_get();
+	if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+		LOG_ERR("TCP connect to %s:80 failed: %d", addr_str, errno);
+		err = -1;
+		goto out;
+	}
+	LOG_INF("TCP connect to %s:80 OK (%lld ms)", addr_str, k_uptime_get() - t0);
 
-error:
-	server_disconnect();
+	t0 = k_uptime_get();
+	if (send(fd, req, sizeof(req) - 1, 0) < 0) {
+		LOG_ERR("Failed to send HTTP request: %d", errno);
+		err = -1;
+		goto out;
+	}
+
+	ssize_t len = recv(fd, reply, sizeof(reply) - 1, 0);
+	if (len <= 0) {
+		LOG_ERR("No HTTP reply: %d", errno);
+		err = -1;
+		goto out;
+	}
+
+	reply[len] = '\0';
+	char *eol = strpbrk(reply, "\r\n");
+	if (eol) {
+		*eol = '\0';
+	}
+	LOG_INF("HTTP reply: \"%s\" (round trip %lld ms)", reply, k_uptime_get() - t0);
+	err = 0;
+
+out:
+	if (fd >= 0) {
+		(void)close(fd);
+	}
+	freeaddrinfo(res);
 	return err;
 }
 
@@ -176,6 +210,8 @@ static int provision_softsim_from_serial(void)
 	uart_irq_callback_user_data_set(uart_dev, serial_cb, &rx);
 	uart_irq_rx_enable(uart_dev);
 
+	status_led_set(STATUS_LED_AWAIT_PROFILE);
+
 	do {
 		LOG_INF("Transfer SoftSIM profile using serial COM port, terminate by "
 			"newline character (return key)");
@@ -188,6 +224,7 @@ static int provision_softsim_from_serial(void)
 	/* Provision the profile to the SoftSIM filesystem */
 	if (nrf_softsim_provision((uint8_t *)profile, rx.pos) != 0) {
 		LOG_ERR("SoftSIM Profile provisioning failed");
+		status_led_set(STATUS_LED_ERROR);
 	}
 
 	k_free(profile);
@@ -214,6 +251,7 @@ int main(void)
 	 * filesystem this initializes. */
 	if (nrf_softsim_init()) {
 		LOG_ERR("Failed to initialize SoftSIM.");
+		status_led_set(STATUS_LED_ERROR);
 		return -1;
 	}
 #endif
@@ -224,9 +262,12 @@ int main(void)
 		}
 	}
 
+	status_led_set(STATUS_LED_MODEM_INIT);
+
 	int32_t err = nrf_modem_lib_init();
 	if (err) {
 		LOG_ERR("Failed to initialize modem library, error: %d", err);
+		status_led_set(STATUS_LED_ERROR);
 	}
 
 #ifndef CONFIG_SOFTSIM_AUTO_INIT
@@ -248,8 +289,6 @@ int main(void)
 	}
 #endif /* CONFIG_SOFTSIM_FACTORY_RESET_ON_PROVISION */
 
-	work_init();
-
 	modem_connect();
 
 	LOG_INF("Waiting for LTE connect event.");
@@ -257,17 +296,23 @@ int main(void)
 	} while (k_sem_take(&lte_connected, K_SECONDS(10)));
 
 	LOG_INF("LTE connected!");
-	err = server_init();
-	if (err) {
-		LOG_ERR("Not able to initialize UDP server connection");
-		return -1;
+
+	int failures = 0;
+
+	for (int i = 1; i <= 3; i++) {
+		LOG_INF("--- Google reachability check %d/3 ---", i);
+		status_led_set(STATUS_LED_NET_CHECK);
+		if (ping_google() == 0) {
+			LOG_INF("--- check %d/3 PASSED ---", i);
+		} else {
+			LOG_ERR("--- check %d/3 FAILED ---", i);
+			failures++;
+		}
+		status_led_set(STATUS_LED_LTE_CONNECTED);
+		k_sleep(K_SECONDS(3));
 	}
 
-	err = server_connect();
-	if (err) {
-		LOG_ERR("Not able to connect to UDP server");
-		return -1;
-	}
-
-	k_work_schedule(&server_transmission_work, K_NO_WAIT);
+	LOG_INF("Reachability checks done. Idling.");
+	status_led_set(failures ? STATUS_LED_ERROR : STATUS_LED_IDLE_OK);
+	return 0;
 }
